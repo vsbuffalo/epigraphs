@@ -1,0 +1,21 @@
+[project]
+name = "epigraph"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["dot2tex>=2.11.3", "graphviz>=0.20.3", "typer>=0.15.4"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8.3.5", "ruff>=0.11.11"]
+
+[project.scripts]
+epigraph = "epigraph.cli:app"
+
+[tool.ruff]
+extend-include = ["tests/*py"]
+line-length = 100
