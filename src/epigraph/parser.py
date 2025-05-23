@@ -1,78 +1,97 @@
+import json
 import re
-from typing import List, Tuple, Optional, Dict
-from epigraph.model import Node, Edge
+from pathlib import Path
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass, field
 
+@dataclass
+class Node:
+    id: str
+    label: str
+    cls: Optional[str] = None
+    attrs: Dict[str, str] = field(default_factory=dict)
 
-def parse_attrs(style: Optional[str]) -> dict:
-    """Parse Graphviz-style [key=value, key2=value2] string into dict."""
-    if not style:
-        return {}
-    attrs = {}
-    for part in style.split(","):
-        if "=" in part:
-            key, val = part.strip().split("=", 1)
-            val = val.strip()
-            if val.startswith('"') and val.endswith('"'):
-                val = val[1:-1]
-            attrs[key.strip()] = val
-    return attrs
+@dataclass
+class Edge:
+    source: str
+    target: str
+    label: Optional[str] = None
+    cls: Optional[str] = None
+    attrs: Dict[str, str] = field(default_factory=dict)
 
+def parse_dsl(text_or_path: str | Path) -> Tuple[List[Node], List[Edge], Dict[str, List[str]], Dict]:
+    if isinstance(text_or_path, Path):
+        text = text_or_path.read_text()
+    else:
+        text = text_or_path
 
-def parse_dsl(
-    text: str,
-) -> Tuple[
-    List[Node],
-    List[Edge],
-    Dict[str, List[str]],  # groups
-    Dict[str, Dict[str, str]],  # styles
-]:
-    nodes: List[Node] = []
-    edges: List[Edge] = []
-    groups: Dict[str, List[str]] = {"core": []}
-    styles: Dict[str, Dict[str, str]] = {}
-    node_ids = set()
+    nodes = []
+    edges = []
+    groups = {}
+    style_lines = []
+    in_style = False
+    depth = 0
 
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    _attr = re.compile(r'(\w+)\s*=\s*("[^"]*"|\S+)')
+    _state = re.compile(r"state\s+(\w+)(?:\s+\[(.+?)\])?")
+    _edge_lbl = re.compile(r"(\w+)\s+--\s*(.+?)\s*-->\s*(\w+)(?:\s+\[(.+?)\])?")
+    _edge_plain = re.compile(r"(\w+)\s*-->\s*(\w+)(?:\s+\[(.+?)\])?")
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not in_style and line.lstrip().startswith("style"):
+            after = line.split("{", 1)[1] if "{" in line else ""
+            style_lines.append(after)
+            in_style = True
+            depth = 1
             continue
-
-        # style block
-        match = re.match(r"style\s+(\w+)\s+\[(.+?)\]", line)
-        if match:
-            style_name, attr_str = match.groups()
-            styles[style_name] = parse_attrs(attr_str)
+        if in_style:
+            depth += line.count("{") - line.count("}")
+            if depth == 0:
+                in_style = False
+                continue
+            style_lines.append(line)
             continue
-
-        # state declaration
-        match = re.match(r"state\s+(\w+)(?:\s+\[(.+?)\])?", line)
-        if match:
-            node_id, attr_str = match.groups()
-            attrs = parse_attrs(attr_str)
-            label = attrs.pop("label", node_id)
-            if label.startswith('"') and label.endswith('"'):
-                label = label[1:-1]
-            group = attrs.pop("group", "core")
-            groups.setdefault(group, []).append(node_id)
-            if group != "core":
-                groups["core"].append(node_id)  # also add to default core group
-            nodes.append(Node(id=node_id, label=label, style=attrs))
-            node_ids.add(node_id)
+        code = line.split("#", 1)[0].strip()
+        if not code:
             continue
-
-        # labeled edge
-        match = re.match(r"(\w+)\s+--(.+?)-->\s+(\w+)(?:\s+\[(.+?)\])?", line)
-        if match:
-            src, label, tgt, attr_str = match.groups()
-            style = parse_attrs(attr_str)
-            edges.append(Edge(source=src, target=tgt, label=label.strip(), style=style))
+        if m := _state.match(code):
+            nid, attr_str = m.groups()
+            attrs = {k: v.strip('"') for k, v in _attr.findall(attr_str or "")}
+            label = attrs.pop("label", nid)
+            cls = attrs.pop("class", None)
+            grp = attrs.pop("group", None)
+            if grp:
+                groups.setdefault(grp, []).append(nid)
+            nodes.append(Node(nid, label, cls, attrs))
             continue
-
-        # plain edge
-        match = re.match(r"(\w+)\s+-->\s+(\w+)", line)
-        if match:
-            src, tgt = match.groups()
-            edges.append(Edge(source=src, target=tgt))
+        if m := _edge_lbl.match(code):
+            s, lbl, t, attr_str = m.groups()
+            attrs = {k: v.strip('"') for k, v in _attr.findall(attr_str or "")}
+            edges.append(Edge(s, t, lbl, attrs.pop("class", None), attrs))
             continue
+        if m := _edge_plain.match(code):
+            s, t, attr_str = m.groups()
+            attrs = {k: v.strip('"') for k, v in _attr.findall(attr_str or "")}
+            edges.append(Edge(s, t, None, attrs.pop("class", None), attrs))
+            continue
+        raise ValueError(f"bad line: {code}")
 
-    return nodes, edges, groups, styles
+    for n in nodes:
+        groups.setdefault("core", []).append(n.id)
+
+    style = {"global": {}, "classes": {}}
+    if style_lines:
+        cleaned = []
+        for ln in style_lines:
+            ln = ln.strip()
+            if "#" in ln:
+                ln = ln.split("#", 1)[0].rstrip()
+            if ln:
+                cleaned.append(ln)
+        s = "\n".join(cleaned)
+        if not s.startswith("{"): s = "{" + s
+        if not s.endswith("}"): s += "}"
+        style = json.loads(s)
+
+    return nodes, edges, groups, style

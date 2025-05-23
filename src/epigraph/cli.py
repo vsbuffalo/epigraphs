@@ -1,50 +1,65 @@
-import typer
+from __future__ import annotations
 from pathlib import Path
-from graphviz import Source
+import json5 as json
+import tempfile, typer
+import subprocess
 from epigraph.parser import parse_dsl
-from epigraph.render_dot import to_dot
+from epigraph.render_mmd import render_mmd
 
 app = typer.Typer()
 
+def _merge_style(base: dict, extra: dict) -> dict:
+    merged = {
+        "global":  {**base.get("global",  {}), **extra.get("global",  {})},
+        "classes": {**base.get("classes", {})}
+    }
+    for cls, attrs in extra.get("classes", {}).items():
+        merged["classes"].setdefault(cls, {}).update(attrs)
+    return merged
+
+
+def assert_mmdc() -> None:
+    """Check if mmdc is installed."""
+    try:
+        subprocess.run(["mmdc", "--version"], check=True, capture_output=True)
+    except FileNotFoundError:
+        raise RuntimeError("mmdc not found. Please install mermaid-cli: npm install -g @mermaid-js/mermaid-cli")
 
 @app.command()
 def render(
-    spec: Path = typer.Argument(..., help="Path to DSL model file"),
-    out: Path = typer.Option("diagram.svg", "--out", "-o", help="Output SVG file"),
-    engine: str = typer.Option("dot", help="Graphviz engine to use"),
-    view: bool = typer.Option(False, "--view", help="Open SVG after rendering"),
-    rankdir: str = typer.Option("LR", "--rankdir", help="Graphviz rank direction"),
-    nodesep: float = typer.Option(0.25, "--nodesep", help="Graphviz nodesep"),
-    ranksep: float = typer.Option(0.2, "--ranksep", help="Graphviz ranksep"),
-    rounded: bool = typer.Option(True, "--rounded", help="Use rounded corners"),
-):
-    """Render a flow diagram from a DSL spec."""
-    text = spec.read_text()
+    spec: Path  = typer.Argument(..., help="Input .flow file"),
+    style: Path | None = typer.Option(None, "--style", "-s", help="External .style.json"),
+    out:   Path = typer.Option("diagram.mmd", "--out", "-o", help="Output .mmd or .pdf"),
+    rankdir: str = typer.Option("LR", help="Layout direction"),
+    pdf: bool = typer.Option(False, "--pdf", "-p", help="Export PDF via mmdc --pdfFit"),
+    view: bool = typer.Option(False, help="Open result after rendering"),
+) -> None:
+    """Render Mermaid (.mmd) or directly to PDF."""
+    nodes, edges, groups, internal_style = parse_dsl(spec)
 
-    # Unpack full parser result (includes groups and styles)
-    nodes, edges, groups, styles = parse_dsl(text)
+    if style:
+        internal_style = _merge_style(internal_style, json.loads(style.read_text()))
 
-    # Pass groups and styles to to_dot
-    dot_source = to_dot(
-        nodes,
-        edges,
-        groups,
-        styles,
-        rankdir=rankdir,
-        nodesep=nodesep,
-        ranksep=ranksep,
-        rounded=rounded,
-    )
+    mmd = render_mmd(nodes, edges, groups, internal_style, rankdir)
 
-    src = Source(dot_source, format="svg", engine=engine)
-    output_path = src.render(outfile=str(out), cleanup=True)
+    # ── PDF path ────────────────────────────────────────────────────
+    if pdf or out.suffix.lower() == ".pdf":
+        assert_mmdc()
+        with tempfile.NamedTemporaryFile("w+", suffix=".mmd", delete=False) as tmp:
+            tmp.write(mmd); tmp.flush()
+            pdf_path = out.with_suffix(".pdf")
+            cmd = ["mmdc", "-i", tmp.name, "-o", str(pdf_path), "--pdfFit"]
+            subprocess.run(cmd, check=True)
+        typer.echo(f"✅ PDF written to {pdf_path}")
+        if view:
+            import webbrowser; webbrowser.open(pdf_path.resolve().as_uri())
+        return
 
-    typer.echo(f"✅ Diagram written to {output_path}")
+    # ── .mmd path ───────────────────────────────────────────────────
+    out.write_text(mmd)
+    typer.echo(f"✅ Mermaid written to {out}")
     if view:
-        import webbrowser
-
-        webbrowser.open(str(out.resolve()))
-
+        import webbrowser; webbrowser.open(out.resolve().as_uri())
 
 if __name__ == "__main__":
     app()
